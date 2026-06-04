@@ -1,0 +1,9 @@
+services:
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.44.0-jammy
+    ipc: host
+    volumes:
+      - .:/work
+    working_dir: /work
+    # Keeps the container alive so you can run commands against it
+    command: tail -f /dev/null
