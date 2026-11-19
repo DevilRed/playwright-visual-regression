@@ -19,5 +19,6 @@ test: install
 install:
 	docker compose exec playwright npm install
 
+# show test report
 report:
 	docker compose exec playwright npx playwright show-report --host 0.0.0.0

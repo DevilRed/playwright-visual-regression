@@ -82,6 +82,31 @@ Run the complete suite:
 make test
 ```
 
+The default Playwright configuration uses the HTML reporter. To print
+test results and totals directly in the terminal, override the reporter:
+
+```bash
+docker compose exec playwright npx playwright test --reporter=line
+```
+
+Playwright also supports combined reporters:
+
+```bash
+docker compose exec playwright npx playwright test --reporter=line,html
+```
+
+List tests without executing them:
+
+```bash
+docker compose exec playwright npx playwright test --list
+```
+
+Get machine-readable JSON results:
+
+```bash
+docker compose exec playwright npx playwright test --reporter=json
+```
+
 Run a specific file:
 
 ```bash
