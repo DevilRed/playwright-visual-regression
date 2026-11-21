@@ -13,7 +13,9 @@
  *
  * The template lives in demo/ and is served by the webServer in playwright.config.js.
  * Baselines are approved screenshots of your own build, not design exports.
- * See css-development.md §2, §14, §19 and §23 for the surrounding workflow.
+ * For a step-by-step change workflow (e.g. hiding the hero on mobile or adding
+ * a nav link), see README "Changing the Template Without Breaking Other
+ * Sections". See css-development.md §2, §14, §19 and §23 for the wider context.
  */
 import { test, expect } from '@playwright/test';
 

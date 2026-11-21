@@ -135,6 +135,128 @@ These baselines are screenshots of **your own approved build**, not exports of a
 | Diff changes between runs | Animations, transitions or dynamic content | `animations: 'disabled'`, remove timers/counters, keep viewports fixed |
 | Green locally, red in CI | Different OS/font rendering | Run both in the same Docker image; commit baselines generated in that image |
 
+## Changing the Template Without Breaking Other Sections
+
+Use this loop for any feature request or bug fix. The goal is to know **before** you approve a baseline which sections and viewports are supposed to change.
+
+1. **Start green.** `docker compose exec playwright npx playwright test --reporter=line`. Do not begin on a red suite — you would not be able to tell which failures are yours.
+2. **Map the change to tests.** Write down which sections and breakpoints it can touch (table below). If the requirement is about *presence or visibility* rather than appearance, add an assertion — screenshots alone will not notice a hidden section.
+3. **Add or change the assertion first** and run it narrowly, expecting red:
+
+   ```bash
+   docker compose exec playwright npx playwright test tests/template-demo.spec.js --project=chromium -g "hero" --reporter=line
+   ```
+
+4. **Implement the smallest change** that makes it pass. Keep CSS scoped to the component, not global overrides.
+5. **Run the whole spec in one browser** (`--project=chromium`) to see exactly which screenshots changed. Expected diffs equal the sections from step 2; anything else is a regression.
+6. **Approve only intentional image changes** with a scoped `--update-snapshots`, then run the **full suite in all three browsers**.
+7. **Review the commit.** Code and approved baselines go together; inspect the image diffs, not just `git diff --stat`.
+
+### Scenario 1: hide the hero on mobile
+
+Requirement: the hero must not be shown below 768 px, but stays visible on tablet and desktop.
+
+There is currently no screenshot of `hero`, so hiding it would not fail anything — screenshots only see the sections they capture. Add a visibility assertion in each breakpoint describe:
+
+```js
+// mobile describe
+test('hero is hidden - mobile', async ({ page }) => {
+  await expect(page.getByTestId('hero')).toBeHidden();
+});
+
+// tablet and desktop describes
+test(`hero is visible - ${name}`, async ({ page }) => {
+  await expect(page.getByTestId('hero')).toBeVisible();
+});
+```
+
+Then hide the section for narrow widths in `demo/styles.css`, for example `@media (max-width: 767px) { section[data-testid="hero"] { display: none; } }`.
+
+Expected impact:
+
+- Header: no change.
+- Card grid and footer element screenshots: normally **no change** — an element shot captures that element, not the content that moved above it. This is the main benefit of section-level shots.
+- Layout assertions: still pass; the grid remains one column and the page still fits.
+- **No baseline updates needed.** A full-page screenshot would change on mobile; add one only as a final acceptance check (css-development.md §14), not as the primary diagnostic.
+
+Tip: put a tag such as `@hero` in feature-specific test titles so `-g @hero` runs just that scenario.
+
+### Scenario 2: add a "Sales" link to the menu
+
+Requirement: a fifth nav item in the header at every breakpoint.
+
+1. Add the assertion before touching the markup. Scope it to the header so a same-named footer link cannot cause a strict-mode violation:
+
+   ```js
+   test(`Sales link is in the header - ${name}`, async ({ page }) => {
+     await expect(
+       page.getByTestId('site-header').getByRole('link', { name: 'Sales' }),
+     ).toBeVisible();
+   });
+   ```
+
+2. Add `<a href="#">Sales</a>` to the `<nav>` in `demo/index.html`.
+3. Run `--project=chromium`. The new assertion passes, but `header-*.png` fails at all three breakpoints because the nav is wider (and wraps on mobile). `no horizontal overflow - mobile` is the other check to watch: five links must still fit at 375 px.
+4. Inspect the three header diffs in the report. If the only change is the added link, approve just those baselines:
+
+   ```bash
+   docker compose exec playwright npx playwright test tests/template-demo.spec.js --project=chromium -g "header screenshot" --update-snapshots
+   ```
+
+5. Repeat for `firefox` and `webkit` (each browser has its own baseline), then run the full suite.
+
+### Change → affected checks
+
+| Change | Likely affected checks | Baseline action |
+|---|---|---|
+| Hide/show a section (hero) | Visibility assertion; any screenshot of that section; a full-page shot | Add assertion; section baselines of *other* components stay unchanged |
+| Add or rename a nav item | Header screenshots at every breakpoint; mobile overflow; scoped link assertion | Approve header baselines per browser |
+| Color or spacing token change | Many section screenshots, plus layout assertions | Approve deliberately; small deltas may pass under the 1% tolerance |
+| New component | New `getByTestId` screenshot and layout assertion | Generate one baseline per browser and breakpoint |
+| New breakpoint | New entry in `viewports` | Generate its baselines; check overflow and columns |
+| Bug fix in CSS | Diff of the affected section; check neighbours for unexpected shifts | Approve only if the diff matches the fix |
+
+### Guardrails
+
+- One logical change at a time; do not mix a bug fix with a refactor.
+- Never run a blanket `--update-snapshots` just to get green — scope it with `-g` and `--project`.
+- Keep `data-testid` values stable; rename them only together with the tests, in the same commit.
+- Scope role locators to a section (`getByTestId('site-header').getByRole(...)`) when the nav and footer share link names.
+- Add an assertion for behaviour (visible/hidden, link present, column count). Screenshots prove appearance, not semantics.
+- If an intentional change still passes, the delta was under the tolerance — tighten that shot's threshold or add a layout assertion.
+- Run in the same Docker image everywhere and commit baselines generated in that image.
+- When CI fails but local passes: use `--last-failed`, verify the committed baselines, then inspect the trace from the HTML report.
+
+## Reusing This Setup in Another Project
+
+Only three things are project-specific: **where the page is served**, **which selectors you assert**, and **which screenshots you compare**. Docker, browsers, retries, reporting and the failure workflow stay the same.
+
+1. **Point at the site.** Set `baseURL` in `playwright.config.js`. If Playwright should start the site, set `webServer.command` and `webServer.url`; otherwise delete `webServer`. Keep `reuseExistingServer: !process.env.CI`.
+2. **Swap the hooks.** Keep the skeleton from `tests/template-demo.spec.js` — a describe per breakpoint, `beforeEach` navigation, `getByTestId`/role locators, section screenshots, overflow/column assertions — but target your theme's containers. Adding `data-testid` to your templates is more reliable than `div > div:nth-child(2)`.
+3. **Start with fresh baselines.** Remove the demo snapshots (or keep the demo as a separate, clearly named spec) and generate your own:
+
+   ```bash
+   docker compose exec playwright npx playwright test --update-snapshots
+   ```
+
+   Review and commit them per browser. Never reuse a baseline captured with a different rendering engine.
+4. **Decide what stays.** Keep `tests/example.spec.js` as a connectivity smoke test or delete it; keep the demo spec as a training example or remove it. The config only needs `testDir` and the specs you actually run.
+
+| Target | `baseURL` / server | What to watch |
+|---|---|---|
+| PrestaShop theme | Shared Docker network, `baseURL: http://prestashop` (service name); or `http://host.docker.internal:8080` with `extra_hosts` on Linux | Disable the debug toolbar and cookie/GDPR modules for screenshots; add `data-testid` in `.tpl` files; mask carousels and dynamic product blocks; wait for `#js-product-list` rather than using `networkidle` |
+| WordPress theme | Shared network, `baseURL: http://wordpress:8080`; for a static build, serve compiled output with `webServer` | Use a logged-out context so the admin bar does not appear; enqueue one compiled stylesheet; hide cookie banners; override CMS-generated markup with dedicated CSS |
+| React/SPA or custom app | `webServer` starts the dev server or serves built files; `baseURL` points to it | Wait for a root/testid selector after hydration instead of `networkidle`; mock APIs with `page.route()`; keep viewports fixed and animations off |
+
+Inside the container, `localhost` means the Playwright container itself — use a service name on a shared Docker network or `host.docker.internal` for a server on the host. The "PrestaShop Theme Development or Adapting to Other Projects" and "Migrating This Scaffold to a New Project" sections below have full Compose/network examples; `css-development.md` §21 covers platform-specific porting.
+
+To keep the suite portable:
+
+- Match the Playwright image tag in `docker-compose.yml` to `@playwright/test` in `package.json`, and use the same image locally and in CI.
+- Store baselines next to their spec, commit them, and generate them inside this Docker image.
+- Add a `BASE_URL` environment override in the config if one suite must run against several environments; keep secrets out of the repo.
+- Treat the suite as regression protection for **your approved build**. Comparing a build against a PSD/Figma design is a separate job (css-development.md §2 and §12).
+
 ## Project Structure
 
 ```
@@ -431,7 +553,7 @@ Example for a WordPress Docker setup:
 ```yaml
 services:
   playwright:
-    image: mcr.microsoft.com/playwright:v1.48.0-jammy # Update to match package.json
+    image: mcr.microsoft.com/playwright:v1.60.0-jammy # Update to match package.json
     ipc: host
     ports:
       - "9323:9323"
