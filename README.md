@@ -35,10 +35,114 @@ if you're running tests frequently,  run `make install` once and then run `docke
 | `make test` | Install npm dependencies and run all tests |
 | `make report` | Serve the HTML report on port 9323 |
 
+## Worked Example: Testing an HTML/CSS Template
+
+The repository includes a self-contained example that needs no external site:
+
+- `demo/index.html` and `demo/styles.css` — a responsive template (header, hero, metrics, card grid, footer) with no JS, remote fonts or external assets.
+- `tests/template-demo.spec.js` — the specs for that template.
+- `playwright.config.js` — `baseURL: http://localhost:8080` plus a `webServer` that runs `python3 -m http.server 8080 --directory demo`. Playwright starts and stops the server for you; no extra terminal is needed.
+
+Run only this example:
+
+```bash
+docker compose exec playwright npx playwright test tests/template-demo.spec.js --reporter=line
+```
+
+### Viewing the template in a browser while you debug
+
+The config's `webServer` only runs during a test run and is bound inside the container, so its port is not reachable from your host browser. To inspect the page while editing CSS, use one of these:
+
+- **Fastest, no server:** open `demo/index.html` directly in your browser — for example `xdg-open /var/www/html/CSS/testing/demo/index.html` on Linux. The relative `styles.css` link resolves from `file://`, so you get the fully styled page.
+- **Served over HTTP, matching Playwright:** from the repository root, run `python3 -m http.server 8080 --directory demo`, then open http://localhost:8080. Stop it with Ctrl+C. Reload after each CSS edit.
+
+Use your browser's responsive/device toolbar to eyeball 375 px, 768 px and 1440 px — those are the exact widths the specs lock. When a screenshot test fails, use `make report` (http://localhost:9323) to compare Expected / Actual / Diff, iterate on the live page, then rerun the scoped test against the baseline.
+
+If you want the page served from the container itself, add `8080:8080` to the ports in `docker-compose.yml`, recreate the container with `make down && make up`, then run:
+
+```bash
+docker compose exec playwright python3 -m http.server 8080 --directory demo --bind 0.0.0.0
+```
+
+and open http://localhost:8080.
+
+What it demonstrates:
+
+- **Three fixed breakpoints** — mobile 375×812, tablet 768×1024, desktop 1440×900 — set with `test.use({ viewport })` inside a `test.describe`. This locks the layout without adding browser projects, so the existing smoke tests are unaffected.
+- **Component screenshots** — `header-<breakpoint>.png`, `card-grid-<breakpoint>.png` and `footer-<breakpoint>.png`, captured from `getByTestId(...)` locators with `animations: 'disabled'` and `maxDiffPixelRatio: 0.01`. Section-level shots are easier to diagnose than one full-page image: a 4 px header shift no longer turns the whole page red.
+- **Layout assertions** — no horizontal overflow (`scrollWidth <= clientWidth`) and the card grid really reflows from one column on mobile to two on tablet and three on desktop.
+
+Create the baselines explicitly on the first run — in Playwright 1.60 a missing snapshot **fails** rather than silently creating one:
+
+```bash
+docker compose exec playwright npx playwright test tests/template-demo.spec.js --update-snapshots
+```
+
+That writes 27 images into `tests/template-demo.spec.js-snapshots/` (one per breakpoint, component and browser, for example `header-mobile-chromium-linux.png`). Review and commit them. Every later run compares against them. Each browser gets its own baseline because font and subpixel rendering differ, even inside the same Docker image.
+
+To adapt this to your own template:
+
+1. Change `webServer.command` and `baseURL` in `playwright.config.js` to serve your template. If your server already runs, remove `webServer` and just set `baseURL`.
+2. Add stable `data-testid` attributes to the sections you want to check.
+3. Copy the spec pattern: one `describe` per breakpoint, one screenshot per section, plus a few layout assertions.
+4. Keep captured areas deterministic — no animations, timestamps, carousels or lazy images — and wait for `document.fonts.ready` before screenshots.
+5. Generate the baselines once, review them, then commit them.
+
+## When a Test Fails
+
+There are two different failures and they need different triage.
+
+### A functional or layout assertion failed
+
+1. The line reporter prints the failing locator and expected/received values. Re-run a narrow slice while iterating:
+
+   ```bash
+   docker compose exec playwright npx playwright test tests/template-demo.spec.js --project=chromium -g "mobile" --reporter=line
+   docker compose exec playwright npx playwright test --last-failed
+   ```
+
+2. `make report` opens the HTML report at http://localhost:9323 with the error, call log and failure screenshot.
+3. Traces: the config uses `trace: 'on-first-retry'`. Locally `retries: 0`, so the first failure records no trace. Force one when you need it:
+
+   ```bash
+   docker compose exec playwright npx playwright test tests/template-demo.spec.js --trace retain-on-failure --reporter=line
+   ```
+
+   On CI, `retries: 2` means the first retry already has a trace. Open it from the HTML report (`make report`): the failing test has a **Trace** attachment that opens the viewer in your browser on port 9323. If you run Playwright directly on the host, `npx playwright show-trace test-results/<test-directory>/trace.zip` also works — inside the container the viewer's URL is not published to the host, so prefer the report.
+4. Fix the cause instead of weakening the assertion. Use `-g`, `--project` and `--last-failed` to keep the loop short.
+
+### A screenshot comparison failed
+
+1. Open the HTML report and look at **Expected / Actual / Diff**; the same three images are also under `test-results/`. Read the diff image first, not the mismatch percentage — a small percentage can hide a missing icon.
+2. Decide which image is wrong:
+   - **Unexpected change** (spacing drift, wrong color, broken breakpoint): fix the CSS and rerun. Work top to bottom — a shifted header moves everything below it, so fix the first red region first.
+   - **Intentional change**: review the new actual image, then approve only the affected baseline:
+
+     ```bash
+     docker compose exec playwright npx playwright test tests/template-demo.spec.js --project=chromium -g "card-grid-mobile" --update-snapshots
+     ```
+
+     Rerun without the flag afterwards and inspect the image diff in git before committing. A blanket `--update-snapshots` across all browsers rewrites the reference for every rendering engine and hides real regressions.
+
+These baselines are screenshots of **your own approved build**, not exports of a PSD/Figma design. Comparing a build against a design file is a separate job described in `css-development.md` (§2 and §12). This suite only tells you what changed since the last approval.
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| A whole image is red | Wrong viewport/scale, or a baseline from a different browser | Check the file name against the project and breakpoint; never reuse a Chromium baseline for WebKit |
+| Text is red across the shot | Font fallback or different weight | Use system/self-hosted fonts and wait for `document.fonts.ready` |
+| Everything below one point shifted | One earlier spacing or height change | Fix the topmost red region, then rerun |
+| CSS changed but the test still passed | The change affected fewer pixels than `maxDiffPixelRatio` (1%) | Tighten the threshold for that shot, or add a layout assertion for the property you care about |
+| Diff changes between runs | Animations, transitions or dynamic content | `animations: 'disabled'`, remove timers/counters, keep viewports fixed |
+| Green locally, red in CI | Different OS/font rendering | Run both in the same Docker image; commit baselines generated in that image |
+
 ## Project Structure
 
 ```
 ├── AGENTS.md               # Guidance for coding agents
+├── css-development.md      # Design-to-code and visual QA workflow notes
+├── demo/
+│   ├── index.html          # Responsive HTML/CSS template used by the worked example
+│   └── styles.css          # Styles for the demo template
 ├── docker-compose.yml      # Playwright container definition
 ├── index.html              # Minimal local static HTML page; not automatically served
 ├── Makefile                # Convenience commands
@@ -46,14 +150,15 @@ if you're running tests frequently,  run `make install` once and then run `docke
 ├── package-lock.json       # Locked npm dependency versions
 ├── playwright.config.js    # Playwright configuration
 ├── tests/
-│   └── example.spec.js     # Smoke tests for playwright.dev
+│   ├── example.spec.js     # Smoke tests for playwright.dev
+│   └── template-demo.spec.js # Responsive template example (screenshots + layout assertions)
 ├── playwright-report/      # Generated HTML report (gitignored)
 └── test-results/           # Generated run artifacts (gitignored)
 ```
 
-Screenshot baselines are stored next to the spec that creates them, in a generated directory such as `tests/example.spec.js-snapshots/`. Add specs under `tests/`; organize them by page or feature as the suite grows.
+Screenshot baselines are stored next to the spec that creates them, in a generated directory such as `tests/template-demo.spec.js-snapshots/`. Add specs under `tests/`; organize them by page or feature as the suite grows.
 
-The current test suite contains only the two smoke tests in `tests/example.spec.js`; it does not yet test `index.html` or include screenshot comparisons. By default, Playwright runs each spec in Chromium, Firefox, and WebKit. When `CI` is set, the config disallows focused-only tests, retries failures twice, and uses one worker.
+The suite contains the two smoke tests in `tests/example.spec.js` plus the responsive-template example in `tests/template-demo.spec.js`. The root `index.html` is still a scratch page and is not served or tested. By default, Playwright runs each spec in Chromium, Firefox, and WebKit. When `CI` is set, the config disallows focused-only tests, retries failures twice, and uses one worker.
 
 ## Writing Tests
 
@@ -91,7 +196,7 @@ test('homepage visual regression', async ({ page }) => {
 });
 ```
 
-The first run generates the baseline screenshot. Subsequent runs compare against it and fail if the difference exceeds the threshold.
+A missing baseline fails the test in Playwright 1.60. Create it with `--update-snapshots`, then later runs compare against it and fail if the difference exceeds the threshold.
 
 ### Testing a Specific Element
 
